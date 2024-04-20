@@ -4,6 +4,7 @@ const { Client, ActionRowBuilder, ButtonBuilder, ButtonStyle, GatewayIntentBits,
 const client = new Client({intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]});
 const WebSocket = require('ws');
 const https = require('https');
+const { exit, send } = require("process");
 var webhookClient = "";
 
 var edge_rollout = 27;
@@ -13,6 +14,7 @@ var ws_con = [0, 0]
 var current_group_id;
 var current_channel_id;
 var current_message_id;
+var current_button_turn = new ActionRowBuilder().addComponents();
 var is_join = 0;
 var is_human = 0;
 var current_image = {}
@@ -82,14 +84,7 @@ function open_ws(index, url, cookie, using_ping, userid) {
                                         });
                                         const msg = await channel.send({
                                             content: "Please select the bot turn Chat",
-                                            components: [
-                                                new ActionRowBuilder().addComponents(
-                                                    new ButtonBuilder()
-                                                        .setCustomId("test")
-                                                        .setLabel("Testing button")
-                                                        .setStyle(ButtonStyle.Primary)
-                                                )
-                                            ],
+                                            components: [current_button_turn],
                                         })
                                         current_message_id = msg.id
                                     } else is_human = 0;
@@ -127,23 +122,17 @@ function load_group_chat(interactions, load_history_chat) {
                     content: current_gc_history.turns[a].candidates[0].raw_content,
                     username: current_gc_history.turns[a].author.name,
                     avatarURL: current_image[current_gc_history.turns[a].author.name]
-                }).then(() => resolve()).catch((error) => reject(error));
+                }).then(async () => resolve()).catch((error) => reject(error));
             }));
         }
         
         Promise.all(webhookPromises)
             .then(async () => {
                 interactions.editReply(`Channel has been created: <#${current_channel_id}>\nHistory chat has been loaded!`)
+                
                 const msg = await interactions.client.channels.cache.get(current_channel_id).send({
                     content: "Please select the bot turn Chat",
-                    components: [
-                        new ActionRowBuilder().addComponents(
-                            new ButtonBuilder()
-                                .setCustomId("test")
-                                .setLabel("Testing button")
-                                .setStyle(ButtonStyle.Primary)
-                        )
-                    ],
+                    components: [current_button_turn],
                 });
                 is_join = 1;
                 current_message_id = msg.id
@@ -171,94 +160,138 @@ client.on("ready", async () => {
     await client.application.commands.create(new SlashCommandBuilder().setName("group_list").setDescription("Group Chat List"))
     await client.application.commands.create(new SlashCommandBuilder().setName("group_join").setDescription("Join into Group Chat").addStringOption(option => option.setName("group_name").setDescription("Group Name").setRequired(true)).addIntegerOption(option => option.setName("load_history_chat").setDescription("Load History Chat").setRequired(false)))
     await client.application.commands.create(new SlashCommandBuilder().setName("group_dc").setDescription("Disconnect from Current Group Chat"))
-    console.log('Bot is ready!');
+    console.log('Bot is ready!\nPress CTRL + C to stop the Discord Bot');
 });
 
 client.on("interactionCreate", async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-    switch(interaction.commandName) {
-        case "login": {
-            if (ws_con[0] && ws_con[1]) return interaction.reply("You are already logged in!")
-
-            user_data = JSON.parse(await https_fetch("plus.character.ai", "/chat/user/", "GET", {'Authorization': `Token ${config.cai_token}`}));
-            if (!user_data && !user_data.user && !user_data.user.user && !user_data.user.user.id) return interaction.reply("Cannot login into Character.AI: Incorrect Token");
-
-            await open_ws(0, "wss://neo.character.ai/connection/websocket", `edge_rollout=${edge_rollout}; HTTP_AUTHORIZATION="Token ${config.cai_token}"`, true, user_data.user.user.id)
-            await open_ws(1, "wss://neo.character.ai/ws/", `edge_rollout=${edge_rollout}; HTTP_AUTHORIZATION="Token ${config.cai_token}"`)
-            current_group_list = JSON.parse(await https_fetch("neo.character.ai", "/murooms/?include_turns=false", "GET", {'Authorization': `Token ${config.cai_token}`}))
-
-            interaction.reply("Successfully login into Character.AI Server!")
-            break;
-        }
-        case "logout": {
-            if (!ws_con[0] && !ws_con[1]) return interaction.reply("You are already logged out!")
-
-            ws_con[0].close()
-            ws_con[1].close()
-            user_data = "";
-            current_group_list = "";
-            is_join = 0;
-            ws_con = [0, 0]
-            current_image = {}
-
-            interaction.reply("Successfully logged out from Character.AI Server")
-        }
-        case "group_list": {
-            if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
-            if (current_group_list.rooms.length) {
-                let send_to_chat = "\`\`\`"
-                for (let a = 0; a < current_group_list.rooms.length; a++) {
-                    send_to_chat += "Group name: " + current_group_list.rooms[a].title + "\nCharacters list: "
-                    for (let b = 0; b < current_group_list.rooms[a].characters.length; b++) {
-                        send_to_chat += current_group_list.rooms[a].characters[b].name + ", "
-                    }
-                    send_to_chat = send_to_chat.slice(0, -2)
-                    send_to_chat += "\n\n"
-                }
-                send_to_chat += "\`\`\`"
-
-                interaction.reply(send_to_chat)
-            } else interaction.reply("You have no group chat")
-            break;
-        }
-        case "group_join": {
-            if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
-            if (current_group_list.rooms.length) {
-                const user_input = interaction.options.getString("group_name", true)
-                current_image = {}
-                for (let a = 0; a < current_group_list.rooms.length; a++) {
-                    if (current_group_list.rooms[a].title === user_input) {
-                        current_group_id = current_group_list.rooms[a].id
-                        for (let b = 0; b < current_group_list.rooms[a].characters.length; b++) current_image[current_group_list.rooms[a].characters[b].name] = "https://characterai.io/i/400/static/avatars/" + current_group_list.rooms[a].characters[b].avatar_url
-                        ws_con[0].send(`{"subscribe":{"channel":"room:${current_group_list.rooms[a].id}"},"id":3}`);
-                        const channel = await interaction.guild.channels.create({
-                            name: user_input,
-                            type: ChannelType.GuildText,
-                            parent: interaction.channel.parentId
-                        })
-                        current_channel_id = channel.id
-                        webhookClient = await client.channels.cache.get(channel.id).createWebhook({
-                            name: "Character.AI Webhook"
-                        })
-                        interaction.reply(`Channel has been created: <#${channel.id}>\nLoad History chat...`)
-                        return load_group_chat(interaction, interaction.options.getInteger("load_history_chat", false))
-                    }
-                }
-                interaction.reply("Error to join Group chat: Group not found!")
+    if (interaction.isButton()) {
+        if (is_join) {
+            if (interaction.customId === "random_turn") {
+                await send_ws(0, JSON.stringify({
+                    "rpc":{
+                        "method":"unused_command","data":{
+                            "command":"generate_turn",
+                            "request_id":generateRandomUUID().slice(0, -12) + current_group_id.split("-")[4],
+                            "payload":{
+                                "chat_type":"TYPE_MU_ROOM",
+                                "chat_id":current_group_id,
+                                "user_name":user_data.user.user.username,
+                                "smart_reply":"CHARACTERS",
+                                "smart_reply_delay":0
+                            }
+                        }
+                    },
+                    "id":4
+                }))
+            } else {
+                await send_ws(0, JSON.stringify({
+                    "rpc": {
+                      "method": "unused_command",
+                      "data": {
+                        "command": "generate_turn",
+                        "request_id": generateRandomUUID().slice(0, -12) + current_group_id.split("-")[4],
+                        "payload": {
+                          "chat_type": "TYPE_MU_ROOM",
+                          "character_id": interaction.customId,
+                          "chat_id": current_group_id
+                        }
+                      }
+                    },
+                    "id": 13
+                }))
             }
-            break;
         }
-        case "group_dc": {
-            if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
-            ws_con[0].send(`{"unsubscribe":{"channel":"room:${current_group_id}"},"id":3}`);
-            interaction.reply("Successfully disconnected from Group Chat")
-            await interaction.guild.channels.cache.get(current_channel_id).delete()
-            current_group_id = "";
-            current_channel_id = "";
-            is_join = 0;
-            break;
+    } else {
+        if (!interaction.isChatInputCommand()) return;
+        switch(interaction.commandName) {
+            case "login": {
+                if (ws_con[0] && ws_con[1]) return interaction.reply("You are already logged in!")
+
+                user_data = JSON.parse(await https_fetch("plus.character.ai", "/chat/user/", "GET", {'Authorization': `Token ${config.cai_token}`}));
+                if (!user_data && !user_data.user && !user_data.user.user && !user_data.user.user.id) return interaction.reply("Cannot login into Character.AI: Incorrect Token");
+
+                await open_ws(0, "wss://neo.character.ai/connection/websocket", `edge_rollout=${edge_rollout}; HTTP_AUTHORIZATION="Token ${config.cai_token}"`, true, user_data.user.user.id)
+                await open_ws(1, "wss://neo.character.ai/ws/", `edge_rollout=${edge_rollout}; HTTP_AUTHORIZATION="Token ${config.cai_token}"`)
+                current_group_list = JSON.parse(await https_fetch("neo.character.ai", "/murooms/?include_turns=false", "GET", {'Authorization': `Token ${config.cai_token}`}))
+
+                interaction.reply("Successfully login into Character.AI Server!")
+                break;
+            }
+            case "logout": {
+                if (!ws_con[0] && !ws_con[1]) return interaction.reply("You are already logged out!")
+
+                ws_con[0].close()
+                ws_con[1].close()
+                user_data = "";
+                current_group_list = "";
+                is_join = 0;
+                ws_con = [0, 0]
+                current_image = {}
+
+                interaction.reply("Successfully logged out from Character.AI Server")
+            }
+            case "group_list": {
+                if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
+                if (current_group_list.rooms.length) {
+                    let send_to_chat = "\`\`\`"
+                    for (let a = 0; a < current_group_list.rooms.length; a++) {
+                        send_to_chat += "Group name: " + current_group_list.rooms[a].title + "\nCharacters list: "
+                        for (let b = 0; b < current_group_list.rooms[a].characters.length; b++) {
+                            send_to_chat += current_group_list.rooms[a].characters[b].name + ", "
+                        }
+                        send_to_chat = send_to_chat.slice(0, -2)
+                        send_to_chat += "\n\n"
+                    }
+                    send_to_chat += "\`\`\`"
+
+                    interaction.reply(send_to_chat)
+                } else interaction.reply("You have no group chat")
+                break;
+            }
+            case "group_join": {
+                if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
+                if (current_group_list.rooms.length) {
+                    const user_input = interaction.options.getString("group_name", true)
+                    current_image = {}
+                    for (let a = 0; a < current_group_list.rooms.length; a++) {
+                        if (current_group_list.rooms[a].title === user_input) {
+                            current_group_id = current_group_list.rooms[a].id
+                            current_button_turn.addComponents(new ButtonBuilder().setCustomId("random_turn").setLabel("Random Turn").setStyle(ButtonStyle.Primary))
+                            for (let b = 0; b < current_group_list.rooms[a].characters.length; b++) {
+                                current_button_turn.addComponents(new ButtonBuilder().setCustomId(current_group_list.rooms[a].characters[b].id).setLabel(current_group_list.rooms[a].characters[b].name).setStyle(ButtonStyle.Primary))
+                                current_image[current_group_list.rooms[a].characters[b].name] = "https://characterai.io/i/400/static/avatars/" + current_group_list.rooms[a].characters[b].avatar_url
+                            }
+                            ws_con[0].send(`{"subscribe":{"channel":"room:${current_group_list.rooms[a].id}"},"id":3}`);
+                            const channel = await interaction.guild.channels.create({
+                                name: user_input,
+                                type: ChannelType.GuildText,
+                                parent: interaction.channel.parentId
+                            })
+                            current_channel_id = channel.id
+                            webhookClient = await client.channels.cache.get(channel.id).createWebhook({
+                                name: "Character.AI Webhook"
+                            })
+                            interaction.reply(`Channel has been created: <#${channel.id}>\nLoad History chat...`)
+                            return load_group_chat(interaction, interaction.options.getInteger("load_history_chat", false))
+                        }
+                    }
+                    interaction.reply("Error to join Group chat: Group not found!")
+                }
+                break;
+            }
+            case "group_dc": {
+                if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
+                ws_con[0].send(`{"unsubscribe":{"channel":"room:${current_group_id}"},"id":3}`);
+                interaction.reply("Successfully disconnected from Group Chat")
+                await interaction.guild.channels.cache.get(current_channel_id).delete()
+                current_group_id = "";
+                current_channel_id = "";
+                is_join = 0;
+                break;
+            }
         }
     }
+    
 })
 
 client.on("messageCreate", async message => {
@@ -302,17 +335,37 @@ client.on("messageCreate", async message => {
         }))
         const msg = await message.channel.send({
             content: "Please select the bot turn Chat",
-            components: [
-                new ActionRowBuilder().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId("test")
-                        .setLabel("Testing button")
-                        .setStyle(ButtonStyle.Primary)
-                )
-            ],
+            components: [current_button_turn],
         })
         current_message_id = msg.id
     }
 })
+
+function exit_app() {
+    return new Promise(async (resolve, reject) => {
+        if (is_join) {
+            await send_ws(0, `{"unsubscribe":{"channel":"room:${current_group_id}"},"id":3}`);
+            const channel = await client.channels.fetch(current_channel_id)
+            await channel.delete()
+        }
+        if (ws_con[0] && ws_con[1]) {
+            ws_con[0].close()
+            ws_con[1].close()
+        }
+        resolve()
+    })
+}
+
+process.on('SIGINT', async () => {
+    console.log("Exiting...")
+    await exit_app()
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    console.log("Exiting...")
+    await exit_app()
+    process.exit(0);
+});
 
 client.login(config.token)
