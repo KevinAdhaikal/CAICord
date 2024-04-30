@@ -1,371 +1,193 @@
-var config = require("./config.json")
-
-const { Client, ActionRowBuilder, ButtonBuilder, ButtonStyle, GatewayIntentBits, SlashCommandBuilder, ChannelType, Component, ActivityPlatform} = require('discord.js');
+const config = require("./config.json")
+const { Client, ActionRowBuilder, ButtonBuilder, ButtonStyle, GatewayIntentBits, SlashCommandBuilder, ChannelType, Component, ActivityPlatform, MessageActivityType, cleanCodeBlockContent, ChatInputCommandInteraction} = require('discord.js');
 const client = new Client({intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]});
-const WebSocket = require('ws');
-const https = require('https');
-const { exit, send } = require("process");
-var webhookClient = "";
+const CAINode = new (require("cainode"))();
 
-var edge_rollout = 27;
-var current_group_list;
-var user_data;
-var ws_con = [0, 0]
-var current_group_id;
-var current_channel_id;
-var current_message_id;
-var current_button_turn = new ActionRowBuilder().addComponents();
+var is_login = 0;
 var is_join = 0;
-var is_human = 0;
+var result_room_list;
+var current_button_turn = new ActionRowBuilder().addComponents();
+var current_channel_id;
+var current_webhook;
 var current_image = {}
+var current_message_id;
 
-function generateRandomUUID() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      var r = Math.random() * 16 | 0,
-        v = c == 'x' ? r : (r & 0x3 | 0x8);
-      return v.toString(16);
-    });
-}
+function generate_gname_id(data) {
+    const roomTitles = {};
 
-function https_fetch(url, path, method, headers) {
-    return new Promise((resolve, reject) => {
-        const req = https.request({
-            hostname: url,
-            path: path,
-            method: method,
-            headers: {
-                'User-Agent': 'Character.AI/1.8.3 (React Native; Android)',
-                'DNT': '1',
-                'Sec-GPC': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'TE': 'trailers',
-                ...headers
-            }
-        }, (res) => {
-            let data = '';
-            res.on('data', (chunk) => data += chunk);
-            res.on('end', () => resolve(data));
-        });
-        req.end();
-    });
-}
-
-function open_ws(index, url, cookie, using_ping, userid) {
-    return new Promise((resolve, reject) => {
-        ws_con[index] = new WebSocket(url, {
-            headers: {
-                Cookie: cookie
-            }
-        })
-        if (using_ping) {
-            ws_con[index].on('message', async function incoming(message) {
-                message = message.toString()
-                if (message === "{}") ws_con[index].send("{}")
-                else {
-                    message = JSON.parse(message)
-                    if (message["push"]) {
-                        if (message["push"].pub) {
-                            if (message["push"].pub.data.turn) {
-                                if (message["push"].pub.data.turn.candidates[0].is_final) {
-                                    if (!is_human) {
-                                        const channel = await client.channels.fetch(current_channel_id);
-                                        const fetchedMessage = await channel.messages.fetch(current_message_id);
-                                        await fetchedMessage.delete();
-
-                                        await webhookClient.send({
-                                            content: message["push"].pub.data.turn.candidates[0].raw_content,
-                                            username: message["push"].pub.data.turn.author.name,
-                                            avatarURL: current_image[message["push"].pub.data.turn.author.name]
-                                        });
-                                        const msg = await channel.send({
-                                            content: "Please select the bot turn Chat",
-                                            components: [current_button_turn],
-                                        })
-                                        current_message_id = msg.id
-                                    } else is_human = 0;
-                                }
-                            }
-                        }
-                    }
-                    //console.log(`[${url}] Connection received message: ` + message)
-                }
-            });
-        } else {
-            ws_con[index].on('message', function incoming(message) {
-                message = message.toString()
-                console.log(`[${url}] Connection received message: ` + message)
-            });
-        }
-        ws_con[index].on('close', function close() {
-            console.log(`[${url}] Connection closed`);
-        });
-        ws_con[index].once('open', function open() {
-            if (userid) ws_con[index].send(`{"connect":{"name":"js"},"id":1}{"subscribe":{"channel":"user#${userid}"},"id":2}`)
-            console.log(`[${url}] Successfully Connected!`)
-            resolve()
-        })
-    });
-}
-
-function load_group_chat(interactions, load_history_chat) {
-    return new Promise(async (resolve, reject) => {
-        let current_gc_history = JSON.parse(await https_fetch("neo.character.ai", `/turns/${current_group_id}/`, "GET", {'Authorization': `Token ${config.cai_token}`}))
-        let webhookPromises = [];
-        for (let a = (load_history_chat && (current_gc_history.turns.length - load_history_chat) > 0) ? load_history_chat - 1: current_gc_history.turns.length - 1; a > -1; a--) {
-            webhookPromises.push(new Promise((resolve, reject) => {
-                webhookClient.send({
-                    content: current_gc_history.turns[a].candidates[0].raw_content,
-                    username: current_gc_history.turns[a].author.name,
-                    avatarURL: current_image[current_gc_history.turns[a].author.name]
-                }).then(async () => resolve()).catch((error) => reject(error));
-            }));
-        }
+    data.rooms.forEach(room => {
+        const title = room.title.toLowerCase().replace(/ /g, '_').replace(/'/g, '');
+        let nameId = title;
         
-        Promise.all(webhookPromises)
-            .then(async () => {
-                interactions.editReply(`Channel has been created: <#${current_channel_id}>\nHistory chat has been loaded!`)
-                
-                const msg = await interactions.client.channels.cache.get(current_channel_id).send({
-                    content: "Please select the bot turn Chat",
-                    components: [current_button_turn],
-                });
-                is_join = 1;
-                current_message_id = msg.id
-                resolve();
-            })
-            .catch((error) => {
-                reject(error);
-            });
-    });
-}
+        if (roomTitles[title] !== undefined) {
+            roomTitles[title]++;
+            nameId = `${title}_${roomTitles[title]}`;
+        } else roomTitles[title] = 1;
 
-function send_ws(index, data) {
-    return new Promise((resolve, reject) => {
-        ws_con[index].send(data)
-        ws_con[index].once("message", function incoming(data) {
-            resolve(data)
-        })
+        room.name_id = nameId;
     });
+    
+    return data;
 }
 
 client.on("ready", async () => {
     console.log("Preparing slash commands...");
-    await client.application.commands.create(new SlashCommandBuilder().setName("login").setDescription("Log into Character.AI Server").addStringOption(option => option.setName("token").setDescription("Your Character.AI Token").setRequired(false)))
-    await client.application.commands.create(new SlashCommandBuilder().setName("logout").setDescription("Log out from Character.AI Server"))
-    await client.application.commands.create(new SlashCommandBuilder().setName("group_list").setDescription("Group Chat List"))
-    await client.application.commands.create(new SlashCommandBuilder().setName("group_join").setDescription("Join into Group Chat").addStringOption(option => option.setName("group_name").setDescription("Group Name").setRequired(true)).addIntegerOption(option => option.setName("load_history_chat").setDescription("Load History Chat").setRequired(false)))
-    await client.application.commands.create(new SlashCommandBuilder().setName("group_dc").setDescription("Disconnect from Current Group Chat"))
+
+    await client.application.commands.set([
+        new SlashCommandBuilder().setName("login").setDescription("Log into Character.AI Server").addStringOption(option => option.setName("token").setDescription("Your Character.AI Token").setRequired(false)),
+        new SlashCommandBuilder().setName("logout").setDescription("Log out from Character.AI Server"),
+        new SlashCommandBuilder().setName("group_list").setDescription("Group Chat List"),
+        new SlashCommandBuilder().setName("group_list_refresh").setDescription("Refresh Group Chat List"),
+        new SlashCommandBuilder().setName("group_connect").setDescription("Connect to Group Chat").addStringOption(option => option.setName("name_id_or_group_id").setDescription("Name ID or Group ID").setRequired(true)).addIntegerOption(option => option.setName("load_history_chat").setDescription("Load History Chat").setRequired(false)),
+        new SlashCommandBuilder().setName("group_dc").setDescription("Disconnect from Current Group Chat")
+    ].map((command) => command.toJSON()));
+
     console.log('Bot is ready!\nPress CTRL + C to stop the Discord Bot');
 });
 
 client.on("interactionCreate", async interaction => {
     if (interaction.isButton()) {
-        if (is_join) {
-            if (interaction.customId === "random_turn") {
-                await send_ws(0, JSON.stringify({
-                    "rpc":{
-                        "method":"unused_command","data":{
-                            "command":"generate_turn",
-                            "request_id":generateRandomUUID().slice(0, -12) + current_group_id.split("-")[4],
-                            "payload":{
-                                "chat_type":"TYPE_MU_ROOM",
-                                "chat_id":current_group_id,
-                                "user_name":user_data.user.user.username,
-                                "smart_reply":"CHARACTERS",
-                                "smart_reply_delay":0
-                            }
-                        }
-                    },
-                    "id":4
-                }))
-            } else {
-                await send_ws(0, JSON.stringify({
-                    "rpc": {
-                      "method": "unused_command",
-                      "data": {
-                        "command": "generate_turn",
-                        "request_id": generateRandomUUID().slice(0, -12) + current_group_id.split("-")[4],
-                        "payload": {
-                          "chat_type": "TYPE_MU_ROOM",
-                          "character_id": interaction.customId,
-                          "chat_id": current_group_id
-                        }
-                      }
-                    },
-                    "id": 13
-                }))
-            }
-        }
+        let result = interaction.customId === "random_turn" ? await CAINode.chat.generate_turn() : await CAINode.chat.selected_turn(interaction.customId)
+        await current_webhook.send({
+            content: result["push"].pub.data.turn.candidates[0].raw_content,
+            username: result["push"].pub.data.turn.author.name,
+            avatarURL: current_image[result["push"].pub.data.turn.author.name]
+        });
+        await interaction.channel.messages.delete(current_message_id);
+        current_message_id = (await interaction.channel.send({
+            content: "Please select the bot turn Chat",
+            components: [current_button_turn],
+        })).id
     } else {
         if (!interaction.isChatInputCommand()) return;
+        await interaction.deferReply()
         switch(interaction.commandName) {
             case "login": {
-                if (ws_con[0] && ws_con[1]) return interaction.reply("You are already logged in!")
-
-                user_data = JSON.parse(await https_fetch("plus.character.ai", "/chat/user/", "GET", {'Authorization': `Token ${config.cai_token}`}));
-                if (!user_data && !user_data.user && !user_data.user.user && !user_data.user.user.id) return interaction.reply("Cannot login into Character.AI: Incorrect Token");
-
-                await open_ws(0, "wss://neo.character.ai/connection/websocket", `edge_rollout=${edge_rollout}; HTTP_AUTHORIZATION="Token ${config.cai_token}"`, true, user_data.user.user.id)
-                await open_ws(1, "wss://neo.character.ai/ws/", `edge_rollout=${edge_rollout}; HTTP_AUTHORIZATION="Token ${config.cai_token}"`)
-                current_group_list = JSON.parse(await https_fetch("neo.character.ai", "/murooms/?include_turns=false", "GET", {'Authorization': `Token ${config.cai_token}`}))
-
-                interaction.reply("Successfully login into Character.AI Server!")
+                if (is_login) return interaction.editReply("You're already logged in!")
+                CAINode.login(config.cai_token).then(async () => {
+                    is_login = 1;
+                    result_room_list = generate_gname_id(await CAINode.room.list())
+                    interaction.editReply("Successfully logged into Character.AI Server")
+                }).catch(e => interaction.editReply("Error: " + e))
                 break;
             }
-            case "logout": {
-                if (!ws_con[0] && !ws_con[1]) return interaction.reply("You are already logged out!")
-
-                ws_con[0].close()
-                ws_con[1].close()
-                user_data = "";
-                current_group_list = "";
-                is_join = 0;
-                ws_con = [0, 0]
-                current_image = {}
-
-                interaction.reply("Successfully logged out from Character.AI Server")
-            }
             case "group_list": {
-                if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
-                if (current_group_list.rooms.length) {
+                if (!is_login) return interaction.editReply("Please login first!");
+                if (result_room_list.rooms.length) {
                     let send_to_chat = "\`\`\`"
-                    for (let a = 0; a < current_group_list.rooms.length; a++) {
-                        send_to_chat += "Group name: " + current_group_list.rooms[a].title + "\nCharacters list: "
-                        for (let b = 0; b < current_group_list.rooms[a].characters.length; b++) {
-                            send_to_chat += current_group_list.rooms[a].characters[b].name + ", "
+                    for (let a = 0; a < result_room_list.rooms.length; a++) {
+                        send_to_chat += "Group name ID: " + result_room_list.rooms[a].name_id + "\n"
+                        send_to_chat += "Group name: " + result_room_list.rooms[a].title + "\nCharacters list: "
+                        for (let b = 0; b < result_room_list.rooms[a].characters.length; b++) {
+                            send_to_chat += result_room_list.rooms[a].characters[b].name + ", "
                         }
                         send_to_chat = send_to_chat.slice(0, -2)
                         send_to_chat += "\n\n"
                     }
                     send_to_chat += "\`\`\`"
-
-                    interaction.reply(send_to_chat)
-                } else interaction.reply("You have no group chat")
+                    interaction.editReply(send_to_chat)
+                } else interaction.editReply("You have no group chat")
                 break;
             }
-            case "group_join": {
-                if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
-                if (current_group_list.rooms.length) {
-                    const user_input = interaction.options.getString("group_name", true)
-                    current_image = {}
-                    for (let a = 0; a < current_group_list.rooms.length; a++) {
-                        if (current_group_list.rooms[a].title === user_input) {
-                            current_group_id = current_group_list.rooms[a].id
-                            current_button_turn.addComponents(new ButtonBuilder().setCustomId("random_turn").setLabel("Random Turn").setStyle(ButtonStyle.Primary))
-                            for (let b = 0; b < current_group_list.rooms[a].characters.length; b++) {
-                                current_button_turn.addComponents(new ButtonBuilder().setCustomId(current_group_list.rooms[a].characters[b].id).setLabel(current_group_list.rooms[a].characters[b].name).setStyle(ButtonStyle.Primary))
-                                current_image[current_group_list.rooms[a].characters[b].name] = "https://characterai.io/i/400/static/avatars/" + current_group_list.rooms[a].characters[b].avatar_url
-                            }
-                            ws_con[0].send(`{"subscribe":{"channel":"room:${current_group_list.rooms[a].id}"},"id":3}`);
-                            const channel = await interaction.guild.channels.create({
-                                name: user_input,
-                                type: ChannelType.GuildText,
-                                parent: interaction.channel.parentId
-                            })
-                            current_channel_id = channel.id
-                            webhookClient = await client.channels.cache.get(channel.id).createWebhook({
-                                name: "Character.AI Webhook"
-                            })
-                            interaction.reply(`Channel has been created: <#${channel.id}>\nLoad History chat...`)
-                            return load_group_chat(interaction, interaction.options.getInteger("load_history_chat", false))
+            case "group_list_refresh": {
+                if (!is_login) return interaction.editReply("Please login first!");
+                result_room_list = await CAINode.room.list()
+                interaction.editReply("Group list has been refreshed!")
+                break;
+            }
+            case "group_connect": {
+                if (is_join) return interaction.editReply("You're already connected to another Group chat, please disconnect it first")
+                
+                const name_id_or_group_id = interaction.options.getString("name_id_or_group_id", true)
+                const load_history_chat = interaction.options.getInteger("load_history_chat", false)
+
+                current_image = {}
+
+                for (let a = 0; a < result_room_list.rooms.length; a++) {
+                    if ((name_id_or_group_id === result_room_list.rooms[a].name_id) || name_id_or_group_id === result_room_list.rooms[a].id) {
+                        current_button_turn.addComponents(new ButtonBuilder().setCustomId("random_turn").setLabel("Random Turn").setStyle(ButtonStyle.Primary))
+                        for (let b = 0; b < result_room_list.rooms[a].characters.length; b++) {
+                            current_button_turn.addComponents(new ButtonBuilder().setCustomId(result_room_list.rooms[a].characters[b].id).setLabel(result_room_list.rooms[a].characters[b].name).setStyle(ButtonStyle.Primary))
+                            current_image[result_room_list.rooms[a].characters[b].name] = "https://characterai.io/i/400/static/avatars/" + result_room_list.rooms[a].characters[b].avatar_url
                         }
+                        await CAINode.room.connect(result_room_list.rooms[a].id)
+
+                        current_channel_id = (await interaction.guild.channels.create({
+                            name: name_id_or_group_id,
+                            type: ChannelType.GuildText,
+                            parent: interaction.channel.parentId
+                        })).id
+
+                        current_webhook = await (await client.channels.fetch(current_channel_id)).createWebhook({name: "Character.AI Webhook"})
+                        
+                        await interaction.editReply(`Channel has been created: <#${current_channel_id}>\nLoad History chat...`)
+
+                        let history_chat = await CAINode.chat.history_chat_turns()
+                        for (let a = (load_history_chat && (history_chat.turns.length - load_history_chat) > 0) ? load_history_chat - 1: history_chat.turns.length - 1; a > -1; a--) {
+                            await current_webhook.send({
+                                content: history_chat.turns[a].candidates[0].raw_content,
+                                username: history_chat.turns[a].author.name,
+                                avatarURL: current_image[history_chat.turns[a].author.name]
+                            })
+                        }
+
+                        await interaction.editReply(`Channel has been created: <#${current_channel_id}>\nHistory chat has been loaded!`)
+
+                        current_message_id = (await (await interaction.client.channels.fetch(current_channel_id)).send({
+                            content: "Please select the bot turn Chat",
+                            components: [current_button_turn],
+                        })).id
+                        is_join = 1;
+                        return;
                     }
-                    interaction.reply("Error to join Group chat: Group not found!")
                 }
+                await interaction.editReply("Group chat not found! Please input the correct Group Chat ID/Name ID");
                 break;
             }
             case "group_dc": {
-                if (!ws_con[0] && !ws_con[1]) return interaction.reply("Please login first")
-                ws_con[0].send(`{"unsubscribe":{"channel":"room:${current_group_id}"},"id":3}`);
-                interaction.reply("Successfully disconnected from Group Chat")
-                await interaction.guild.channels.cache.get(current_channel_id).delete()
-                current_group_id = "";
-                current_channel_id = "";
-                is_join = 0;
+                if (!is_join) return interaction.editReply("You're already disconnected from Group chat!");
+                await CAINode.room.disconnect().then(async () => {
+                    await interaction.editReply("Successfully disconnected from Group chat!")
+                    current_button_turn = new ActionRowBuilder().addComponents()
+                    await interaction.guild.channels.delete(current_channel_id)
+                    is_join = 0;
+                }).catch(e => interaction.editReply("Error: " + e));
                 break;
             }
+            case "logout": {
+                if (!is_login) return interaction.editReply("You're already not connected to Character.AI Server")
+                await CAINode.logout()
+                interaction.editReply("Successfully logged out from Character.AI Server")
+                break;
+            }
+            default: interaction.editReply("Unknown command!")
         }
     }
-    
 })
 
-client.on("messageCreate", async message => {
-    if (message.author.bot) return;
-    if (is_join && ws_con[0] && ws_con[1]) {
-        var turn_key = generateRandomUUID()
-        is_human = 1;
-        await (await message.channel.messages.fetch(current_message_id)).delete()
-        await send_ws(0, JSON.stringify({
-            "rpc": {
-                "method": "unused_command",
-                "data": {
-                    "command": "create_turn",
-                    "request_id": generateRandomUUID().slice(0, -12) + current_group_id.split("-")[4],
-                    "payload": {
-                        "chat_type": "TYPE_MU_ROOM",
-                        "num_candidates": 1,
-                        "user_name": user_data.user.user.username,
-                        "turn": {
-                            "turn_key": {
-                                "turn_id": turn_key,
-                                "chat_id": current_group_id
-                            },
-                            "author": {
-                                "author_id": `${user_data.user.user.id}`,
-                                "is_human": true,
-                                "name": user_data.user.user.username
-                            },
-                            "candidates": [
-                                {
-                                    "candidate_id": turn_key,
-                                    "raw_content": message.content
-                                }
-                            ],
-                            "primary_candidate_id": turn_key
-                        }
-                    }
-                }
-            },
-            "id": 10
-        }))
-        const msg = await message.channel.send({
+client.on("messageCreate", async msg => {
+    if (!msg.author.bot && is_join && msg.channel.id === current_channel_id) {
+        await CAINode.chat.send(msg.content)
+        await msg.channel.messages.delete(current_message_id);
+        current_message_id = (await msg.channel.send({
             content: "Please select the bot turn Chat",
             components: [current_button_turn],
-        })
-        current_message_id = msg.id
+        })).id
     }
 })
-
-function exit_app() {
-    return new Promise(async (resolve, reject) => {
-        if (is_join) {
-            await send_ws(0, `{"unsubscribe":{"channel":"room:${current_group_id}"},"id":3}`);
-            const channel = await client.channels.fetch(current_channel_id)
-            await channel.delete()
-        }
-        if (ws_con[0] && ws_con[1]) {
-            ws_con[0].close()
-            ws_con[1].close()
-        }
-        resolve()
-    })
-}
 
 process.on('SIGINT', async () => {
     console.log("Exiting...")
-    await exit_app()
+    if (is_join) await (await client.channels.fetch(current_channel_id)).delete(current_channel_id)
+    await CAINode.logout().catch()
     process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
     console.log("Exiting...")
-    await exit_app()
+    if (is_join) await (await client.channels.fetch(current_channel_id)).delete(current_channel_id)
+    await CAINode.logout().catch()
     process.exit(0);
 });
 
-client.login(config.token)
+client.login(config.discord_bot_token)

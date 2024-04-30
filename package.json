@@ -1,6 +1,6 @@
 {
     "name": "caicord",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Character.AI on Discord",
     "main": "main.js",
     "scripts": {
@@ -9,6 +9,7 @@
     "author": "KevinAdhaikal",
     "license": "ISC",
     "dependencies": {
-        "discord.js": "^14.14.1"
+        "discord.js": "^14.14.1",
+        "cainode": "latest"
     }
 }

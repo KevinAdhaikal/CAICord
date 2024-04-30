@@ -1,4 +1,4 @@
 {
-    "token": "Your discord token",
-    "cai_token": "Your Character.AI Token"
+    "discord_bot_token": "Your Discord Bot Token",
+    "cai_token": "Your C.AI Token"
 }
